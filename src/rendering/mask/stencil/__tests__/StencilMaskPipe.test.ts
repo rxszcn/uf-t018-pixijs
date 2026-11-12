@@ -9,6 +9,7 @@ import { RenderTarget, RenderTexture, STENCIL_MODES, Texture, TextureSource } fr
 import { Container, Graphics, Sprite } from '~/scene';
 
 import type { WebGLRenderer, WebGPURenderer } from '~/rendering';
+import type { GraphicsGpuData, PipeBatchable } from '~/scene/graphics/shared/AbstractGraphicsPipe';
 
 type GpuRenderer = WebGLRenderer | WebGPURenderer;
 
@@ -64,6 +65,66 @@ function stencilMaskSuite(
     {
         jest.restoreAllMocks();
         renderer.destroy();
+    });
+
+    it('should clip every container at the new position when a shared mask moves', () =>
+    {
+        const shared = new Container();
+
+        const contentA = new Sprite(Texture.WHITE);
+
+        contentA.setSize(16, 32);
+        contentA.tint = 0xff0000;
+
+        const contentB = new Sprite(Texture.WHITE);
+
+        contentB.setSize(16, 32);
+        contentB.x = 16;
+        contentB.tint = 0x00ff00;
+
+        // one mask, covering x 0-8 of contentA and x 16-24 of contentB
+        const mask = new Graphics().rect(0, 0, 8, 32).rect(16, 0, 8, 32).fill(0xffffff);
+
+        shared.addChild(contentA, contentB, mask);
+        contentA.mask = mask;
+        contentB.mask = mask;
+
+        const addToBatchSpy = jest.spyOn(renderer.renderPipes.batch, 'addToBatch');
+        const drawSpy = jest.spyOn(renderer.renderPipes.batch, 'execute');
+
+        renderer.render({ container: shared, target: textureA });
+
+        // the shared mask is collected into the batcher once per instruction build, not once per container
+        const maskElements = addToBatchSpy.mock.calls.filter(([element]) => (element as PipeBatchable).renderable === mask);
+        const collectedBatches = (mask._gpuData[renderer.uid] as GraphicsGpuData).batches.length;
+
+        expect(maskElements).toHaveLength(collectedBatches);
+
+        expect(pixelAt(renderer, textureA, 4, 16)).toEqual([255, 0, 0, 255]);
+        expect(pixelAt(renderer, textureA, 20, 16)).toEqual([0, 255, 0, 255]);
+        expect(pixelAt(renderer, textureA, 12, 16).slice(0, 3)).toEqual([0, 0, 0]);
+
+        const drawsPerFrame = drawSpy.mock.calls.length;
+
+        mask.x = 8;
+
+        renderer.render({ container: shared, target: textureA });
+
+        // both containers clip at the moved mask - no ghost of the old position remains
+        expect(pixelAt(renderer, textureA, 12, 16)).toEqual([255, 0, 0, 255]);
+        expect(pixelAt(renderer, textureA, 28, 16)).toEqual([0, 255, 0, 255]);
+        expect(pixelAt(renderer, textureA, 4, 16).slice(0, 3)).toEqual([0, 0, 0]);
+        expect(pixelAt(renderer, textureA, 20, 16).slice(0, 3)).toEqual([0, 0, 0]);
+
+        // moving the mask must not grow the per-frame draw count
+        expect(drawSpy.mock.calls.length).toBe(drawsPerFrame * 2);
+
+        mask.x = 16;
+
+        renderer.render({ container: shared, target: textureA });
+
+        expect(drawSpy.mock.calls.length).toBe(drawsPerFrame * 3);
+        expect(pixelAt(renderer, textureA, 28, 16).slice(0, 3)).toEqual([0, 0, 0]);
     });
 
     it('should track the mask stack and stencil state per render target', () =>
